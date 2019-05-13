@@ -5,47 +5,18 @@ let client = null;
 
 let db = null;
 
-// The actual transfer logic
-async function transfer(from, to, amount) {
-  const session = client.startSession();
-  session.startTransaction();
-  try {
-    const opts = { session, returnOriginal: false };
-    const A = await db.collection('Account').
-    findOneAndUpdate({ name: from }, { $inc: { balance: -amount } }, opts).
-    then(res => res.value);
-    if (A.balance < 0) {
-      // If A would have negative balance, fail and abort the transaction
-      // `session.abortTransaction()` will undo the above `findOneAndUpdate()`
-      throw new Error('Insufficient funds: ' + (A.balance + amount));
-    }
-    
-    const B = await db.collection('Account').
-    findOneAndUpdate({ name: to }, { $inc: { balance: amount } }, opts).
-    then(res => res.value);
-    
-    await session.commitTransaction();
-    session.endSession();
-    return { from: A, to: B };
-  } catch (error) {
-    // If an error occurred, abort the whole transaction and
-    // undo any changes that might have happened
-    await session.abortTransaction();
-    session.endSession();
-    throw error; // Rethrow so calling function sees error
-  }
-}
 
 async function main(){
   
   client = await MongoClient.connect(uri, { useNewUrlParser: true, replicaSet: 'rs' });;
   db = client.db();
 
-  await transfer('A', 'B', 0); // Success
+  let test = await transaction(this, transfer, ['A', 'B', 0]);
+  console.log('response --> ', test);
   
   try {
     // Fails because then A would have a negative balance
-    await transfer('A', 'B', 2);
+    await transaction(this, transfer, ['A', 'B', 2]);
   } catch (error) {
     console.log('---- throw')
     console.error(error); // "Insufficient funds: 1"
@@ -53,14 +24,52 @@ async function main(){
 
   try {
     await Promise.all([
-      transfer('A', 'B', 4),
-      transfer('A', 'B', 2)
+      transaction(this, transfer, ['A', 'B', 6]),
+      transaction(this, transfer, ['A', 'B', 2])
     ]);
   } catch (error) {
     console.log('--- write conflict');
     console.log(error); // "MongoError: WriteConflict"
   }
-  
+
 }
+
+async function transaction(ctx, execTrnxFunc, args){
+ const session = client.startSession();
+  session.startTransaction();
+  try {
+    const opts = { session, returnOriginal: false };
+    ctx.opts = opts;
+    
+    let funcRes = await execTrnxFunc.apply(ctx,args);
+
+    await session.commitTransaction();
+    session.endSession();
+    return funcRes;
+  } catch (error) {
+    // log error and throw
+    //console.log('error --> ', error);
+    await session.abortTransaction();
+    session.endSession();
+    throw error; // Rethrow so calling function sees error
+  }
+}
+
+async function transfer(from, to, amount){
+  const A = await db.collection('Account').
+    findOneAndUpdate({ name: from }, { $inc: { balance: -amount } }, this.opts).
+    then(res => res.value);
+
+  if (A.balance < 0) {
+    throw new Error('Insufficient funds: ' + (A.balance + amount));
+  }
+  
+  const B = await db.collection('Account').
+    findOneAndUpdate({ name: to }, { $inc: { balance: amount } }, this.opts).
+    then(res => res.value);
+
+  return { from: A, to: B };
+}
+
 
 main();
